@@ -1,16 +1,165 @@
 <?php
 declare(strict_types=1);
-if (session_status() !== PHP_SESSION_ACTIVE) session_start();
-require_once __DIR__ . '/db.php';
-function e(mixed $v): string { return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
-function current_user(): ?array { return $_SESSION['user'] ?? null; }
-function require_login(): void { if (!current_user()) { header('Location: index.php'); exit; } }
-function csrf_token(): string { return $_SESSION['csrf'] ??= bin2hex(random_bytes(32)); }
-function verify_csrf(): void { if (!hash_equals(csrf_token(), (string)($_POST['csrf'] ?? ''))) { http_response_code(419); exit('Your session expired. Please try again.'); } }
-function unread_count(): int { if (!current_user()) return 0; $q=db()->prepare('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0'); $q->execute([current_user()['id']]); return (int)$q->fetchColumn(); }
-function page_start(string $title, string $active): void {
- require_login(); $user=current_user(); $links=[['dashboard.php','Overview','▦'],['attendance_logs.php','Attendance logs','◷'],['profile_set_face.php','Profile & set face','◎'],['notifications.php','Notifications','♧']]; $initials=strtoupper(substr($user['name']??'A',0,1));
- ?><!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title><?=e($title)?> · AttendEase</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><link href="assets/css/app.css" rel="stylesheet"></head><body><aside class="sidebar"><a class="brand" href="dashboard.php"><span class="brand-mark">A</span><span>Attend<span class="brand-light">Ease</span></span></a><div class="side-label">WORKSPACE</div><nav class="side-nav"><?php foreach($links as [$href,$label,$icon]):?><a class="nav-link <?=$active===$href?'active':''?>" href="<?=e($href)?>"><span class="nav-icon"><?=$icon?></span><span><?=e($label)?></span><?php if($href==='notifications.php'&&unread_count()):?><span class="nav-count"><?=unread_count()?></span><?php endif?></a><?php endforeach?></nav><div class="sidebar-bottom"><div class="help-card"><span class="help-icon">✦</span><strong>Need a hand?</strong><span>We’re here to help you out.</span><a href="mailto:support@attendease.local">Get support <span>→</span></a></div><div class="side-user"><div class="avatar avatar-small"><?=e($initials)?></div><div class="side-user-copy"><strong><?=e($user['name'])?></strong><span><?=e(ucfirst($user['role']))?></span></div><form action="logout.php" method="post"><input type="hidden" name="csrf" value="<?=e(csrf_token())?>"><button class="icon-button logout-button" aria-label="Sign out" title="Sign out">↗</button></form></div></div></aside><main class="main-area"><header class="topbar"><div><span class="breadcrumb-muted">Workspace</span><span class="breadcrumb-slash">/</span><span class="breadcrumb-current"><?=e($title)?></span></div><div class="topbar-right"><span class="today-label"><?=date('l, F j, Y')?></span><a class="top-avatar" href="profile_set_face.php" aria-label="Your profile"><?=e($initials)?></a></div></header><div class="page-content"><?php
+
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
 }
-function page_end(): void { ?></div><footer class="page-footer">© <?=date('Y')?> AttendEase <span>·</span> Attendance made simple and reliable</footer></main></body></html><?php }
-function status_badge(string $status): string { $class=match($status){'Present','Registered'=>'success','Late'=>'warning','Absent'=>'danger',default=>'muted'}; return '<span class="status-pill status-'.$class.'"><i></i>'.e($status).'</span>'; }
+require_once __DIR__ . '/db.php';
+
+function e(mixed $value): string
+{
+    return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function text_length(string $value): int
+{
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+
+function text_initial(string $value): string
+{
+    return function_exists('mb_substr') ? mb_substr($value, 0, 1, 'UTF-8') : substr($value, 0, 1);
+}
+
+function text_preview(string $value, int $length): string
+{
+    if (function_exists('mb_strimwidth')) {
+        return mb_strimwidth($value, 0, $length, '…', 'UTF-8');
+    }
+    return strlen($value) > $length ? substr($value, 0, max(0, $length - 3)) . '...' : $value;
+}
+
+function current_user(): ?array
+{
+    return isset($_SESSION['user']) && is_array($_SESSION['user']) ? $_SESSION['user'] : null;
+}
+
+function require_login(): void
+{
+    if (!current_user()) {
+        $next = 'dashboard.php';
+        if (basename((string)($_SERVER['SCRIPT_NAME'] ?? '')) === 'checkin.php') {
+            $query = (string)($_SERVER['QUERY_STRING'] ?? '');
+            if (preg_match('/^session=\d+&token=[A-Za-z0-9_-]+$/D', $query)) {
+                $next = 'checkin.php?' . $query;
+            }
+        }
+        header('Location: index.php?next=' . rawurlencode($next));
+        exit;
+    }
+}
+
+function require_role(array $roles): void
+{
+    require_login();
+    if (!in_array(current_user()['role'] ?? '', $roles, true)) {
+        http_response_code(403);
+        page_start('Access restricted', '');
+        echo '<section class="content-card p-4"><h1 class="h4">Access restricted</h1><p class="mb-0">Your account does not have permission to view this page.</p></section>';
+        page_end();
+        exit;
+    }
+}
+
+function csrf_token(): string
+{
+    if (empty($_SESSION['csrf'])) {
+        $_SESSION['csrf'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf'];
+}
+
+function verify_csrf(): void
+{
+    $provided = (string)($_POST['csrf'] ?? '');
+    if ($provided === '' || !hash_equals(csrf_token(), $provided)) {
+        http_response_code(419);
+        exit('Your session expired. Refresh the page and try again.');
+    }
+}
+
+function flash(string $key, ?string $value = null): ?string
+{
+    if ($value !== null) {
+        $_SESSION['_flash'][$key] = $value;
+        return null;
+    }
+    $message = $_SESSION['_flash'][$key] ?? null;
+    unset($_SESSION['_flash'][$key]);
+    return $message;
+}
+
+function unread_count(): int
+{
+    if (!current_user()) {
+        return 0;
+    }
+    $statement = db()->prepare('SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0');
+    $statement->execute([current_user()['id']]);
+    return (int)$statement->fetchColumn();
+}
+
+function student_record(?int $userId = null): ?array
+{
+    $userId ??= (int)(current_user()['id'] ?? 0);
+    $statement = db()->prepare('SELECT s.*,u.full_name,u.email FROM students s JOIN users u ON u.id=s.user_id WHERE s.user_id=?');
+    $statement->execute([$userId]);
+    $student = $statement->fetch();
+    return $student ?: null;
+}
+
+function managed_class_ids(): array
+{
+    $user = current_user();
+    if (!$user || $user['role'] === 'admin') {
+        return [];
+    }
+    if ($user['role'] === 'teacher') {
+        $statement = db()->prepare('SELECT id FROM classes WHERE teacher_id=?');
+        $statement->execute([$user['id']]);
+        return array_map('intval', $statement->fetchAll(PDO::FETCH_COLUMN));
+    }
+    $statement = db()->prepare('SELECT class_id FROM enrollments e JOIN students s ON s.id=e.student_id WHERE s.user_id=?');
+    $statement->execute([$user['id']]);
+    return array_map('intval', $statement->fetchAll(PDO::FETCH_COLUMN));
+}
+
+function status_badge(string $status): string
+{
+    $class = match ($status) {
+        'Present', 'Registered', 'success' => 'success',
+        'Late', 'Pending', 'warning' => 'warning',
+        'Absent', 'alert', 'danger' => 'danger',
+        'Excused', 'info' => 'info',
+        default => 'muted',
+    };
+    return '<span class="status-pill status-' . $class . '"><i></i>' . e($status) . '</span>';
+}
+
+function initials(string $name): string
+{
+    $parts = preg_split('/\s+/', trim($name)) ?: [];
+    $letters = '';
+    foreach (array_slice($parts, 0, 2) as $part) {
+        $letters .= text_initial($part);
+    }
+    return function_exists('mb_strtoupper') ? mb_strtoupper($letters ?: 'AE', 'UTF-8') : strtoupper($letters ?: 'AE');
+}
+
+function page_start(string $title, string $active): void
+{
+    require_login();
+    $pageTitle = $title;
+    $activePage = $active;
+    require __DIR__ . '/includes/header.php';
+}
+
+function page_end(): void
+{
+    require __DIR__ . '/includes/footer.php';
+}
+
+function csrf_field(): string
+{
+    return '<input type="hidden" name="csrf" value="' . e(csrf_token()) . '">';
+}
