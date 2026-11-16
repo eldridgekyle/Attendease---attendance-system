@@ -2,3 +2,8 @@
 /vendor/
 /node_modules/
 /AttendEase.zip
+/.codex/
+/.config/
+/.npm/
+/.ssh/
+/.gitconfig
