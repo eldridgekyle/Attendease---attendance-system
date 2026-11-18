@@ -1,21 +1,38 @@
 # AttendEase
 
-AttendEase is a PHP 8 and MySQL student attendance workspace for administrators, instructors, and students. It includes a seeded class directory, role-scoped attendance reports, a one-time PIN and QR check-in flow, student registration, notification management, and a responsive dashboard.
+AttendEase is a PHP 8 and MySQL attendance workspace for administrators, instructors, and students. It includes role-scoped dashboards, student and class management, attendance reports, notifications, and instructor-started RFC 6238 TOTP attendance sessions.
 
 ## Requirements
 
-- PHP 8.0 or later with PDO MySQL and sessions enabled
+- PHP 8.0 or later with PDO MySQL, OpenSSL, and sessions enabled
 - MySQL 8+ or MariaDB 10.4+
-- A browser with JavaScript enabled; camera access requires HTTPS or localhost
+- HTTPS for production
 
-## Setup
+## Configuration
 
-1. Import the development database: `mysql -u root -p < schema.sql`. The script recreates the AttendEase tables and replaces existing sample records.
-2. Set database credentials in `db.php` or use `ATTENDEASE_DB_HOST`, `ATTENDEASE_DB_NAME`, `ATTENDEASE_DB_USER`, and `ATTENDEASE_DB_PASS` environment variables.
-3. Serve this directory through PHP, for example: `php -S 127.0.0.1:8000`.
-4. Open `http://127.0.0.1:8000`.
+Keep database credentials and the application encryption key in environment variables. Do not commit local environment files or secrets.
 
-The included demo accounts all use the password `password`:
+```sh
+export ATTENDEASE_DB_HOST=127.0.0.1
+export ATTENDEASE_DB_NAME=attendease_db
+export ATTENDEASE_DB_USER=attendease_app
+export ATTENDEASE_DB_PASS='your-database-password'
+export ATTENDEASE_APP_KEY="$(openssl rand -base64 32)"
+```
+
+For a local MySQL socket connection, set `ATTENDEASE_DB_SOCKET` to the socket path instead of using `ATTENDEASE_DB_HOST`.
+
+Keep `ATTENDEASE_APP_KEY` stable. It encrypts active TOTP session secrets in MySQL. Rotating it ends the ability to display or verify codes for sessions already in progress; it does not affect user accounts or attendance records.
+
+## Database setup
+
+For a new development database, import the safe, repeatable setup file:
+
+```sh
+mysql -u "$ATTENDEASE_DB_USER" -p < schema.sql
+```
+
+The development seed accounts all use the password `password`; change their passwords before deployment. These are ordinary accounts that still require their email and password at sign-in. There are no one-click demo sign-ins.
 
 | Role | Email |
 | --- | --- |
@@ -24,33 +41,69 @@ The included demo accounts all use the password `password`:
 | Instructor | `sofia.lim@attendease.test` |
 | Student | `alyssa.cruz@attendease.test` |
 
-The login page also has one-click Admin, Teacher, and Student buttons. New student registration asks for the first class to enroll in. Administrators can create student accounts and assign classes from the directory.
+For an existing AttendEase database, take a database backup and run the incremental migration from the repository root:
 
-## Attendance check-in
+```sh
+mysql -u "$ATTENDEASE_DB_USER" -p "$ATTENDEASE_DB_NAME" < migrations/001_totp_attendance.sql
+```
 
-Administrators and instructors can open the attendance scanner, select an assigned class, and generate a six-digit PIN with a 2, 5, or 10 minute expiry. The QR code opens the matching check-in page. Students must be signed in and enrolled in that class; a class/date record can only be checked in once per student. An instructor can correct records from the attendance report, with the change marked as a manual override.
+The migration is tracked in `schema_migrations` and can be run again safely. It retains users, classes, enrollments, notifications, and attendance rows. It adds per-session TOTP data and account status, repairs the malformed hash used by the original development seed accounts, replaces the old student/class/day attendance uniqueness key with a student/session key, labels old face-verified rows as `Legacy`, closes old PIN/QR sessions, and removes obsolete face and PIN/QR fields. Old attendance rows remain attached to their students and classes with `session_id` set to `NULL`.
 
-Face registration uses the browser camera for a live preview when available and falls back to a simulated capture. The database stores a mock registration marker, not an image or a biometric template. Connect a dedicated, consent-based biometric service before using this interface for real face identification.
+Do not import `schema.sql` over a populated production database. Use the migration for an existing installation.
 
-## Security and deployment
+## Run locally
 
-Forms that change data use session CSRF tokens, database writes use PDO prepared statements, and teacher/student queries enforce role ownership. Use HTTPS, set a non-root database account, replace the demo credentials, configure secure session cookies, and remove seeded demo accounts before deployment. The included `schema.sql` is intended for a fresh development database because it drops and recreates its tables.
+From the project directory, start the PHP development server after exporting the database and application settings above:
 
-Bootstrap, Bootstrap Icons, Chart.js, and QRCode.js load from public CDNs.
+```sh
+php -S 127.0.0.1:8000
+```
+
+Open `http://127.0.0.1:8000`.
+
+## Checks
+
+Run the RFC 6238 test vectors and the database workflow checks on a development database:
+
+```sh
+php tests/totp_vectors.php
+php tests/database_workflows.php
+```
+
+The database workflow check uses a transaction and rolls back its temporary accounts, enrollments, sessions, and attendance rows.
+
+## TOTP attendance
+
+An instructor chooses an assigned class and clicks **Start Attendance**. AttendEase creates a random session secret, encrypts it with `ATTENDEASE_APP_KEY`, displays its six-digit RFC 6238 code, and refreshes the displayed code every 30 seconds. Sessions expire after 15 minutes and instructors can end them manually. Starting another session for the same class ends the previous active session.
+
+Students sign in, choose an enrolled class, enter the displayed current code, and submit it. The server verifies the current 30-second TOTP step. A code remains valid for every eligible student during its current interval, while a student can create only one attendance row per session. Invalid submissions are rate limited. Ended or expired sessions reject check-ins server-side.
+
+No face recognition, camera scanning, external authenticator, QR code, or PIN flow is used.
+
+## Security notes
+
+- Passwords use PHP `password_hash()` and `password_verify()`.
+- Sessions use strict mode, HTTP-only cookies, SameSite Lax, session ID rotation, database-backed account status, and CSRF protection on state-changing forms.
+- Sign-in and attendance code attempts are rate limited.
+- Instructors can manage only their assigned classes and student rosters. Students can view their own attendance and check in only to enrolled classes.
+- Student deactivation retains the account row, enrollment history, and attendance history. Class edits preserve the class ID and its attendance history.
+- Configure a non-root MySQL account, use HTTPS, and rotate the seeded development passwords before deployment.
 
 ## Project map
 
 | File | Purpose |
 | --- | --- |
-| `schema.sql` | Database tables, relationships, demo accounts, classes, attendance, and notifications |
-| `db.php` | PDO connection and environment-based database settings |
-| `functions.php` | Sessions, access checks, CSRF protection, formatting helpers, and shared page entry points |
-| `includes/` | Shared sidebar, top bar, notification menu, and page footer |
-| `index.php` | Sign-in, demo access, and student sign-up |
-| `dashboard.php` | Role-scoped stats, class schedule, attendance chart, and activity feed |
-| `attendance_logs.php` | Attendance filters, CSV export, PIN / QR session setup, and staff corrections |
-| `attendance_session.php` / `checkin.php` | Expiring PIN and QR session creation and student check-in validation |
-| `students_manage.php` | Instructor/admin student directory, enrollment, and class listing |
-| `profile_set_face.php` | Account password, courses, attendance summary, and face profile setup |
-| `notifications.php` | Read, unread, alert filter, and delete actions |
-| `assets/css/app.css` | Shared colors, layout, component styles, and mobile breakpoints |
+| `schema.sql` | Safe fresh-development schema and preserved sample dataset |
+| `migrations/001_totp_attendance.sql` | Incremental migration for existing AttendEase databases |
+| `db.php` | PDO connection using environment configuration |
+| `functions.php` | Session and role checks, CSRF, password/session helpers, and RFC 6238 functions |
+| `index.php` | Password sign-in and student registration |
+| `dashboard.php` | Role-scoped statistics, schedules, charts, and recent activity |
+| `attendance_logs.php` | Attendance filters, CSV exports, corrections, and TOTP session controls |
+| `attendance_session.php` / `checkin.php` | Server-side session lifecycle, code display, and student verification |
+| `students_manage.php` | Student accounts, enrollments, class management, and instructor assignments |
+| `profile.php` | Account profile, password update, courses, and attendance summary |
+| `notifications.php` | Notification read, unread, filter, and delete actions |
+| `assets/css/app.css` | Shared AttendEase visual styles and responsive layouts |
+
+Bootstrap, Bootstrap Icons, and Chart.js load from public CDNs.

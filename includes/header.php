@@ -34,8 +34,8 @@ $headerNotices = $noticeQuery->fetchAll();
         </div>
       </div>
       <div class="dropdown">
-        <button class="profile-menu-button" data-bs-toggle="dropdown" aria-expanded="false"><span class="avatar top-avatar"><?= e(initials($user['full_name'])) ?></span><span class="top-user-copy"><strong><?= e($user['full_name']) ?></strong><small><?= e(ucfirst($user['role'])) ?></small></span><i class="bi bi-chevron-down"></i></button>
-        <ul class="dropdown-menu dropdown-menu-end profile-dropdown"><li><a class="dropdown-item" href="profile_set_face.php"><i class="bi bi-person"></i> Account profile</a></li><li><hr class="dropdown-divider"></li><li><form action="logout.php" method="post" class="px-2"><?= csrf_field() ?><button class="dropdown-item text-danger" type="submit"><i class="bi bi-box-arrow-right"></i> Sign out</button></form></li></ul>
+        <button class="profile-menu-button" data-bs-toggle="dropdown" aria-expanded="false"><span class="avatar top-avatar"><?= e(initials($user['full_name'])) ?></span><span class="top-user-copy"><strong><?= e($user['full_name']) ?></strong><small><?= e(role_label($user['role'])) ?></small></span><i class="bi bi-chevron-down"></i></button>
+        <ul class="dropdown-menu dropdown-menu-end profile-dropdown"><li><a class="dropdown-item" href="profile.php"><i class="bi bi-person"></i> Account profile</a></li><li><hr class="dropdown-divider"></li><li><form action="logout.php" method="post" class="px-2"><?= csrf_field() ?><button class="dropdown-item text-danger" type="submit"><i class="bi bi-box-arrow-right"></i> Sign out</button></form></li></ul>
       </div>
     </div>
   </header>
