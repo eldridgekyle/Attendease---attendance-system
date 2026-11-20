@@ -29,5 +29,8 @@ function db(): PDO
         PDO::ATTR_EMULATE_PREPARES => false,
         PDO::ATTR_STRINGIFY_FETCHES => false,
     ]);
+    $timezone = new DateTimeZone(date_default_timezone_get());
+    $timezoneOffset = (new DateTimeImmutable('now', $timezone))->format('P');
+    $pdo->exec('SET time_zone = ' . $pdo->quote($timezoneOffset));
     return $pdo;
 }

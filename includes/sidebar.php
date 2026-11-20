@@ -28,7 +28,7 @@ $nav[] = ['notifications.php', 'Notifications', 'bi-bell'];
   <div class="sidebar-bottom">
     <div class="help-card"><span class="help-icon"><i class="bi bi-stars"></i></span><strong>Need a hand?</strong><span>Our campus team is ready to help.</span><a href="mailto:support@attendease.test">Contact support <i class="bi bi-arrow-up-right"></i></a></div>
     <div class="side-user">
-      <span class="avatar avatar-small"><?= e(initials($user['full_name'])) ?></span>
+      <span class="avatar avatar-small"><?= avatar_contents($user) ?></span>
       <div class="side-user-copy"><strong><?= e($user['full_name']) ?></strong><span><?= e(role_label($role)) ?> account</span></div>
       <form action="logout.php" method="post" class="m-0"><?= csrf_field() ?><button class="icon-button" aria-label="Sign out" title="Sign out"><i class="bi bi-box-arrow-right"></i></button></form>
     </div>

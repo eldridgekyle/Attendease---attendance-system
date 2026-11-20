@@ -16,22 +16,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
     $id = (int)($_POST['id'] ?? 0);
     $statusValue = (string)($_POST['status'] ?? '');
     $remarks = trim((string)($_POST['remarks'] ?? ''));
-    if ($id < 1 || !in_array($statusValue, ['Present','Late','Absent','Excused'], true)) {
-        flash('error', 'Choose a valid attendance status.');
+    $reason = trim((string)($_POST['reason'] ?? ''));
+    if ($id < 1 || !in_array($statusValue, ['Present','Late','Absent','Excused'], true) || text_length($reason) < 3 || text_length($reason) > 500) {
+        flash('error', 'Choose a valid status and provide a correction reason of 3 to 500 characters.');
         header('Location: attendance_logs.php'); exit;
     }
-    $checkSql = 'SELECT a.id FROM attendance_logs a JOIN classes c ON c.id=a.class_id WHERE a.id=?';
+    try {
+    $checkSql = 'SELECT a.id,a.status FROM attendance_logs a JOIN classes c ON c.id=a.class_id WHERE a.id=?';
     $checkParams = [$id];
     if ($role === 'teacher') { $checkSql .= ' AND c.teacher_id=?'; $checkParams[] = $user['id']; }
+    $checkSql .= ' FOR UPDATE';
+    $pdo->beginTransaction();
     $check = $pdo->prepare($checkSql);
     $check->execute($checkParams);
-    if (!$check->fetchColumn()) {
+    $record = $check->fetch();
+    if (!$record) {
+        $pdo->rollBack();
         flash('error', 'That record was not found in your classes.');
         header('Location: attendance_logs.php'); exit;
     }
+    $audit = $pdo->prepare('INSERT INTO attendance_audit_logs (attendance_log_id,actor_user_id,previous_status,new_status,reason) VALUES (?,?,?,?,?)');
+    $audit->execute([$id,$user['id'],$record['status'],$statusValue,$reason]);
     $update = $pdo->prepare("UPDATE attendance_logs SET status=?,remarks=?,verification_method='Manual Override' WHERE id=?");
     $update->execute([$statusValue, $remarks !== '' ? $remarks : null, $id]);
+    $pdo->commit();
     flash('success', 'Attendance record updated.');
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        error_log('AttendEase attendance correction error: ' . $error->getMessage());
+        flash('error', 'The attendance correction could not be saved. Try again.');
+    }
     header('Location: attendance_logs.php'); exit;
 }
 
@@ -77,7 +91,7 @@ if ($export) {
     header('Content-Disposition: attachment; filename="attendease-attendance-'.date('Y-m-d').'.csv"');
     $out = fopen('php://output','w');
     fputcsv($out,['Student','Student number','Class code','Subject','Instructor','Session ID','Date','Time in','Time out','Status','Verification method','Remarks'], ',', '"', '');
-    while ($record = $exportQuery->fetch()) { fputcsv($out,[$record['full_name'],$record['student_number'],$record['class_code'],$record['subject_name'],$record['instructor_name'],$record['session_id'],$record['attendance_date'],$record['time_in'],$record['time_out'],$record['status'],$record['verification_method'],$record['remarks']], ',', '"', ''); }
+    while ($record = $exportQuery->fetch()) { $cells=[$record['full_name'],$record['student_number'],$record['class_code'],$record['subject_name'],$record['instructor_name'],$record['session_id'],$record['attendance_date'],$record['time_in'],$record['time_out'],$record['status'],$record['verification_method'],$record['remarks']]; fputcsv($out,array_map('csv_safe_cell',$cells), ',', '"', ''); }
     fclose($out); exit;
 }
 $rowQuery = $pdo->prepare($select.' LIMIT '.$perPage.' OFFSET '.(($page-1)*$perPage));
@@ -100,7 +114,7 @@ page_start($role === 'student' ? 'My attendance' : 'Attendance logs','attendance
 <form method="get" class="filter-bar"><div class="search-field"><i class="bi bi-search"></i><input name="q" type="search" placeholder="Search student, number, class…" value="<?= e($term) ?>"></div><div class="filter-control"><label for="class_id">CLASS</label><select id="class_id" name="class_id"><option value="0">All classes</option><?php foreach ($classes as $class): ?><option value="<?= (int)$class['id'] ?>" <?= $classId===(int)$class['id']?'selected':'' ?>><?= e($class['class_code']) ?></option><?php endforeach; ?></select></div><div class="filter-control"><label for="from">FROM</label><input id="from" name="from" type="date" value="<?= e($from) ?>"></div><div class="filter-control"><label for="to">TO</label><input id="to" name="to" type="date" value="<?= e($to) ?>"></div><div class="filter-control status-filter"><label for="status">STATUS</label><select id="status" name="status"><option value="">All statuses</option><?php foreach (['Present','Late','Absent','Excused'] as $option): ?><option value="<?= e($option) ?>" <?= $status===$option?'selected':'' ?>><?= e($option) ?></option><?php endforeach; ?></select></div><button class="btn btn-primary filter-button" type="submit"><i class="bi bi-funnel me-1"></i>Filter</button><?php if ($term||$classId||$status||$from||$to): ?><a class="clear-filter" href="attendance_logs.php">Clear</a><?php endif; ?><button class="btn btn-outline-secondary filter-button" name="export" value="csv" type="submit"><i class="bi bi-download me-1"></i>Export CSV</button></form>
 <div class="table-responsive"><table class="table activity-table report-table"><thead><tr><th>STUDENT</th><th>STUDENT ID</th><th>CLASS</th><th>INSTRUCTOR</th><th>SESSION</th><th>DATE</th><th>TIME IN</th><th>VERIFICATION</th><th>STATUS</th><?php if ($role !== 'student'): ?><th>ACTION</th><?php endif; ?></tr></thead><tbody>
 <?php if (!$rows): ?><tr><td colspan="<?= $role==='student'?9:10 ?>" class="empty-state">No records match these filters.</td></tr><?php else: foreach ($rows as $row): ?><tr><td><div class="student-cell"><span class="avatar student-avatar"><?= e(initials($row['full_name'])) ?></span><strong><?= e($row['full_name']) ?></strong></div></td><td class="table-secondary-text"><?= e($row['student_number']) ?></td><td><strong><?= e($row['class_code']) ?></strong><small class="d-block helper-copy"><?= e($row['subject_name']) ?></small></td><td class="table-secondary-text"><?= e($row['instructor_name']) ?></td><td class="table-secondary-text"><?= $row['session_id'] ? '#'.(int)$row['session_id'] : 'Legacy' ?></td><td class="table-secondary-text"><?= e(date('M j, Y',strtotime($row['attendance_date']))) ?></td><td class="table-secondary-text"><?= $row['time_in']?e(date('g:i A',strtotime($row['time_in']))):'—' ?></td><td class="table-secondary-text"><?= e($row['verification_method']) ?></td><td><?= status_badge($row['status']) ?></td><?php if ($role !== 'student'): ?><td><button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editAttendance<?= (int)$row['id'] ?>" aria-label="Update attendance"><i class="bi bi-pencil-square"></i></button></td><?php endif; ?></tr>
-<?php if ($role !== 'student'): ?><div class="modal fade" id="editAttendance<?= (int)$row['id'] ?>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form method="post" class="modal-content"><?= csrf_field() ?><input type="hidden" name="action" value="update"><input type="hidden" name="id" value="<?= (int)$row['id'] ?>"><div class="modal-header"><div><h2 class="modal-title">Update attendance</h2><p class="helper-copy mb-0 mt-1"><?= e($row['full_name'].' · '.$row['class_code'].' · '.date('M j, Y',strtotime($row['attendance_date']))) ?></p></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><label class="field-label" for="status<?= (int)$row['id'] ?>">STATUS</label><select class="form-select mb-3" id="status<?= (int)$row['id'] ?>" name="status" required><?php foreach (['Present','Late','Absent','Excused'] as $option): ?><option <?= $row['status']===$option?'selected':'' ?>><?= e($option) ?></option><?php endforeach; ?></select><label class="field-label" for="remarks<?= (int)$row['id'] ?>">REMARKS</label><textarea class="form-control" id="remarks<?= (int)$row['id'] ?>" name="remarks" rows="3" maxlength="500" placeholder="Add a note for the record"><?= e($row['remarks'] ?? '') ?></textarea><div class="form-text">Changes are recorded as a manual override.</div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit">Save update</button></div></form></div></div><?php endif; ?>
+<?php if ($role !== 'student'): ?><div class="modal fade" id="editAttendance<?= (int)$row['id'] ?>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form method="post" class="modal-content"><?= csrf_field() ?><input type="hidden" name="action" value="update"><input type="hidden" name="id" value="<?= (int)$row['id'] ?>"><div class="modal-header"><div><h2 class="modal-title">Update attendance</h2><p class="helper-copy mb-0 mt-1"><?= e($row['full_name'].' · '.$row['class_code'].' · '.date('M j, Y',strtotime($row['attendance_date']))) ?></p></div><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><label class="field-label" for="status<?= (int)$row['id'] ?>">STATUS</label><select class="form-select mb-3" id="status<?= (int)$row['id'] ?>" name="status" required><?php foreach (['Present','Late','Absent','Excused'] as $option): ?><option <?= $row['status']===$option?'selected':'' ?>><?= e($option) ?></option><?php endforeach; ?></select><label class="field-label" for="reason<?= (int)$row['id'] ?>">CORRECTION REASON</label><textarea class="form-control mb-3" id="reason<?= (int)$row['id'] ?>" name="reason" rows="2" maxlength="500" minlength="3" required placeholder="Explain why this record is being corrected"></textarea><label class="field-label" for="remarks<?= (int)$row['id'] ?>">REMARKS</label><textarea class="form-control" id="remarks<?= (int)$row['id'] ?>" name="remarks" rows="2" maxlength="500" placeholder="Optional note displayed with the record"><?= e($row['remarks'] ?? '') ?></textarea><div class="form-text">The status change and reason are saved in the audit log.</div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit">Save update</button></div></form></div></div><?php endif; ?>
 <?php endforeach; endif; ?></tbody></table></div>
 <div class="table-footer"><span>Showing <?= count($rows) ?> of <?= number_format($totalRows) ?> records</span><nav aria-label="Attendance pages"><ul class="pagination pagination-sm mb-0"><?php for($p=max(1,$page-2);$p<=min($totalPages,$page+2);$p++): ?><li class="page-item <?= $p===$page?'active':'' ?>"><a class="page-link" href="?<?= e(http_build_query(array_merge($_GET,['page'=>$p]))) ?>"><?= $p ?></a></li><?php endfor; ?></ul></nav></div></section>
 

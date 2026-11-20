@@ -6,6 +6,14 @@ $pdo = db();
 $user = current_user();
 $role = $user['role'];
 $student = $role === 'student' ? student_record() : null;
+$adminOverview = null;
+if ($role === 'admin') {
+    $adminOverview = $pdo->query("SELECT
+      (SELECT COUNT(*) FROM users WHERE role='teacher' AND is_active=1) AS instructors,
+      (SELECT COUNT(*) FROM classes) AS classes,
+      (SELECT COUNT(*) FROM attendance_sessions) AS sessions,
+      (SELECT COUNT(*) FROM users WHERE role='teacher' AND is_active=0) AS pending_instructors")->fetch();
+}
 $scopeJoin = '';
 $scopeWhere = '';
 $scopeParams = [];
@@ -118,6 +126,7 @@ page_start('Overview', 'dashboard.php');
   <div class="col-6 col-xl-3"><article class="stat-card"><div class="stat-top"><span><?= e($label) ?></span><span class="stat-icon icon-<?= e($tone) ?>"><i class="bi <?= e($icon) ?>"></i></span></div><div class="stat-value"><?= number_format($value) ?></div><div class="stat-foot"><span class="stat-<?= e($tone) ?>"><i class="bi bi-graph-up-arrow"></i> <?= e($trendValue) ?></span> <?= e($note) ?></div><div class="stat-accent accent-<?= e($tone) ?>"></div></article></div>
 <?php endforeach; ?>
 </div>
+<?php if ($role === 'admin'): ?><div class="row g-3 mb-3 admin-overview-row"><?php foreach ([['Instructors',$adminOverview['instructors'],'bi-person-badge','blue'],['Classes',$adminOverview['classes'],'bi-journal-bookmark','green'],['Attendance sessions',$adminOverview['sessions'],'bi-clock-history','amber'],['Pending approvals',$adminOverview['pending_instructors'],'bi-person-check','red']] as [$adminLabel,$adminValue,$adminIcon,$adminTone]): ?><div class="col-6 col-xl-3"><article class="stat-card"><div class="stat-top"><span><?= e($adminLabel) ?></span><span class="stat-icon icon-<?= e($adminTone) ?>"><i class="bi <?= e($adminIcon) ?>"></i></span></div><div class="stat-value"><?= number_format((int)$adminValue) ?></div><div class="stat-foot">Current database total</div></article></div><?php endforeach; ?></div><?php endif; ?>
 <div class="row g-3 dashboard-mid">
   <div class="col-12 col-xl-8">
     <section class="content-card mb-3"><div class="card-heading"><div><h2>Attendance analytics</h2><p>Daily attendance trends for the last 7 days</p></div><div class="attendance-meta"><span><i class="bi bi-circle-fill text-success me-1"></i>Present</span><span><i class="bi bi-circle-fill text-warning me-1"></i>Late</span><span><i class="bi bi-circle-fill text-danger me-1"></i>Absent</span></div></div><div class="chart-wrap"><canvas id="attendanceChart" aria-label="Attendance trend chart"></canvas></div></section>

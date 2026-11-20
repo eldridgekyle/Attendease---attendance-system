@@ -9,7 +9,12 @@ if (current_user()) {
 }
 $mode = (string)($_GET['mode'] ?? $_POST['mode'] ?? 'login');
 $mode = in_array($mode, ['login', 'signup'], true) ? $mode : 'login';
-$error = (string)($_GET['error'] ?? '') === 'inactive' ? 'This account is inactive. Contact an administrator.' : '';
+$error = match ((string)($_GET['error'] ?? '')) {
+    'inactive' => 'This account is inactive. Contact an administrator.',
+    'reauthenticate' => 'Your account security details changed. Sign in again.',
+    'password_updated' => 'Your password was updated. Sign in with your new password.',
+    default => '',
+};
 $signupClasses = db()->query('SELECT id,class_code,subject_name FROM classes ORDER BY class_code')->fetchAll();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -20,15 +25,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim((string)($_POST['full_name'] ?? ''));
         $email = strtolower(trim((string)($_POST['email'] ?? '')));
         $password = (string)($_POST['password'] ?? '');
+        $passwordConfirm = (string)($_POST['password_confirm'] ?? '');
         $studentNumber = strtoupper(trim((string)($_POST['student_number'] ?? '')));
         $programYear = trim((string)($_POST['program_year'] ?? ''));
         $section = strtoupper(trim((string)($_POST['section'] ?? '')));
         $classId = (int)($_POST['class_id'] ?? 0);
         $validClassIds = array_map('intval', array_column($signupClasses, 'id'));
-        if (text_length($name) < 2 || text_length($name) > 120 || !filter_var($email, FILTER_VALIDATE_EMAIL)
+        $emailDomain = strtolower(trim((string)(getenv('ATTENDEASE_EMAIL_DOMAIN') ?: '')));
+        $emailMatchesInstitution = $emailDomain === '' || strtolower((string)substr(strrchr($email, '@') ?: '', 1)) === ltrim($emailDomain, '@');
+        if (text_length($name) < 2 || text_length($name) > 120 || !filter_var($email, FILTER_VALIDATE_EMAIL) || !$emailMatchesInstitution
             || text_length($password) < 10 || $studentNumber === '' || $programYear === '' || $section === ''
             || !in_array($classId, $validClassIds, true)) {
-            $error = 'Complete each field, choose a class, and use a password with at least 10 characters.';
+            $error = $emailMatchesInstitution ? 'Complete each field, choose a class, and use a password with at least 10 characters.' : 'Use your institutional email address.';
+        } elseif ($password !== $passwordConfirm) {
+            $error = 'The password and confirmation do not match.';
         } else {
             $pdo = db();
             try {
@@ -44,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $notice = $pdo->prepare("INSERT INTO notifications (user_id,title,message,type) VALUES (?,?,?,'info')");
                 $notice->execute([$userId, 'Welcome to AttendEase', 'Your account is ready. Review your classes and check in with the current code shared by your instructor.']);
                 $pdo->commit();
-                rotate_session_after_login(['id'=>$userId,'full_name'=>$name,'email'=>$email,'role'=>'student','avatar_url'=>null,'created_at'=>date('Y-m-d H:i:s')]);
+                rotate_session_after_login(['id'=>$userId,'full_name'=>$name,'email'=>$email,'role'=>'student','avatar_url'=>null,'created_at'=>date('Y-m-d H:i:s'),'auth_version'=>0]);
                 header('Location: dashboard.php');
                 exit;
             } catch (PDOException $exception) {
@@ -70,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ((int)$rate->fetchColumn() >= 8) {
                 $error = 'Too many sign-in attempts. Try again in 15 minutes.';
             } else {
-                $query = $pdo->prepare('SELECT id,full_name,email,password_hash,role,avatar_url,created_at FROM users WHERE email=? AND is_active=1 LIMIT 1');
+                $query = $pdo->prepare('SELECT id,full_name,email,password_hash,role,avatar_url,created_at,auth_version FROM users WHERE email=? AND is_active=1 LIMIT 1');
                 $query->execute([$email]);
                 $account = $query->fetch();
                 $dummyHash = '$2y$12$HcWuEYNek6nPwaS7XQcFWunI6Y03No93kgKX5ce2RBcuCfvkndne.';
@@ -132,6 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
           <label class="form-label" for="program_year">Program and year</label><input class="form-control mb-3" id="program_year" name="program_year" value="<?= e($_POST['program_year'] ?? '') ?>" placeholder="BSIT · Year 2" required>
           <label class="form-label" for="class_id">First class</label><select class="form-select mb-3" id="class_id" name="class_id" required><option value="">Choose your class</option><?php foreach ($signupClasses as $class): ?><option value="<?= (int)$class['id'] ?>" <?= (int)($_POST['class_id']??0)===(int)$class['id']?'selected':'' ?>><?= e($class['class_code'].' · '.$class['subject_name']) ?></option><?php endforeach; ?></select>
           <label class="form-label" for="password">Create password</label><div class="input-with-icon"><i class="bi bi-lock"></i><input class="form-control" id="password" name="password" type="password" minlength="10" autocomplete="new-password" placeholder="At least 10 characters" required></div>
+          <label class="form-label" for="password_confirm">Confirm password</label><div class="input-with-icon mb-3"><i class="bi bi-lock-fill"></i><input class="form-control" id="password_confirm" name="password_confirm" type="password" minlength="10" autocomplete="new-password" placeholder="Enter the same password" required></div>
           <button class="btn btn-primary w-100 sign-in-btn" type="submit">Create student account <span>→</span></button>
         </form>
         <p class="signup-prompt">Already have an account? <a href="index.php">Sign in</a></p>
@@ -139,7 +150,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <form method="post" class="login-form"><input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="action" value="login"><input type="hidden" name="next" value="<?= e($next) ?>">
           <label for="email" class="form-label">Email address</label><div class="input-with-icon"><i class="bi bi-envelope"></i><input id="email" name="email" type="email" class="form-control" placeholder="you@school.edu" autocomplete="username" required value="<?= e($_POST['email'] ?? '') ?>"></div>
           <label for="password" class="form-label">Password</label><div class="input-with-icon"><i class="bi bi-lock"></i><input id="password" name="password" type="password" class="form-control" placeholder="Enter your password" autocomplete="current-password" required></div>
-          <div class="remember-row"><span>Secure sign-in</span></div>
+          <div class="remember-row"><span>Secure sign-in</span><a href="password_reset.php">Forgot password?</a></div>
           <button class="btn btn-primary w-100 sign-in-btn" type="submit">Sign in <span>→</span></button>
         </form>
         <div class="login-secure"><i class="bi bi-shield-lock"></i> Your information is protected and secure</div>

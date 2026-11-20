@@ -3,6 +3,11 @@
 CREATE DATABASE IF NOT EXISTS attendease_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE attendease_db;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version VARCHAR(64) NOT NULL PRIMARY KEY,
+  applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS users (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   full_name VARCHAR(120) NOT NULL,
@@ -10,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(255) NOT NULL,
   role ENUM('admin','teacher','student') NOT NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
+  auth_version INT UNSIGNED NOT NULL DEFAULT 0,
   avatar_url VARCHAR(500) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_users_role (role)
@@ -38,6 +44,14 @@ CREATE TABLE IF NOT EXISTS students (
   CONSTRAINT fk_students_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS instructors (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL UNIQUE,
+  employee_number VARCHAR(32) NOT NULL UNIQUE,
+  department VARCHAR(120) NOT NULL,
+  CONSTRAINT fk_instructors_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS enrollments (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   student_id INT UNSIGNED NOT NULL,
@@ -54,6 +68,7 @@ CREATE TABLE IF NOT EXISTS attendance_sessions (
   secret_ciphertext VARCHAR(512) NULL,
   expires_at DATETIME NOT NULL,
   ended_at DATETIME NULL,
+  finalized_at DATETIME NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_attendance_sessions_class FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
   CONSTRAINT fk_attendance_sessions_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
@@ -70,7 +85,7 @@ CREATE TABLE IF NOT EXISTS attendance_logs (
   time_in TIME NULL,
   time_out TIME NULL,
   status ENUM('Present','Late','Absent','Excused') NOT NULL DEFAULT 'Present',
-  verification_method ENUM('TOTP','Manual Override','Legacy') NOT NULL DEFAULT 'Legacy',
+  verification_method ENUM('TOTP','Manual Override','System','Legacy') NOT NULL DEFAULT 'Legacy',
   remarks VARCHAR(500) NULL,
   CONSTRAINT fk_attendance_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
   CONSTRAINT fk_attendance_class FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
@@ -98,6 +113,52 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   ip_hash CHAR(64) NOT NULL,
   attempted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_login_attempt_window (email,ip_hash,attempted_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS password_resets (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id INT UNSIGNED NOT NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_password_reset_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_password_reset_expiry (expires_at,used_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS password_reset_attempts (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  email_hash CHAR(64) NOT NULL,
+  ip_hash CHAR(64) NOT NULL,
+  attempted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_password_reset_attempt_window (ip_hash,attempted_at),
+  INDEX idx_password_reset_email_window (email_hash,attempted_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS attendance_audit_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  attendance_log_id INT UNSIGNED NOT NULL,
+  actor_user_id INT UNSIGNED NULL,
+  previous_status ENUM('Present','Late','Absent','Excused') NOT NULL,
+  new_status ENUM('Present','Late','Absent','Excused') NOT NULL,
+  reason VARCHAR(500) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_attendance_audit_record FOREIGN KEY (attendance_log_id) REFERENCES attendance_logs(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_attendance_audit_actor FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  INDEX idx_attendance_audit_record_time (attendance_log_id,created_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  actor_user_id INT UNSIGNED NULL,
+  action VARCHAR(60) NOT NULL,
+  entity_type VARCHAR(40) NOT NULL,
+  entity_id BIGINT UNSIGNED NULL,
+  details TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_admin_audit_actor FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  INDEX idx_admin_audit_entity_time (entity_type,entity_id,created_at),
+  INDEX idx_admin_audit_actor_time (actor_user_id,created_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -153,42 +214,5 @@ INSERT IGNORE INTO students (id,user_id,student_number,program_year,section) VAL
 INSERT IGNORE INTO enrollments (student_id,class_id)
 SELECT s.id,c.id FROM students s CROSS JOIN classes c;
 
--- Each class receives one recent sample record per student; legacy sample history is retained on reruns.
-INSERT INTO attendance_logs (student_id,class_id,attendance_date,time_in,time_out,status,verification_method,remarks)
-SELECT s.id,c.id,
-  CURDATE()-INTERVAL MOD(WEEKDAY(CURDATE())-(FIELD(c.schedule_day,'Monday','Tuesday','Wednesday','Thursday','Friday')-1)+7,7) DAY,
-  CASE WHEN MOD(s.id+c.id,13)=0 THEN NULL ELSE ADDTIME(c.start_time,SEC_TO_TIME(MOD(s.id*7+c.id*11,1500))) END,
-  CASE WHEN MOD(s.id+c.id,13)=0 THEN NULL ELSE ADDTIME(c.end_time,'00:04:00') END,
-  CASE WHEN MOD(s.id+c.id,13)=0 THEN 'Absent' WHEN MOD(s.id*3+c.id,9)=0 THEN 'Late' WHEN MOD(s.id,29)=0 THEN 'Excused' ELSE 'Present' END,
-  CASE WHEN MOD(s.id,5)=0 THEN 'Manual Override' ELSE 'Legacy' END,
-  CASE WHEN MOD(s.id+c.id,13)=0 THEN 'No check-in recorded' WHEN MOD(s.id*3+c.id,9)=0 THEN 'Arrived after class start' ELSE NULL END
-FROM students s CROSS JOIN classes c
-WHERE NOT EXISTS (
-  SELECT 1 FROM attendance_logs existing
-  WHERE existing.student_id=s.id AND existing.class_id=c.id AND existing.session_id IS NULL
-    AND existing.attendance_date=CURDATE()-INTERVAL MOD(WEEKDAY(CURDATE())-(FIELD(c.schedule_day,'Monday','Tuesday','Wednesday','Thursday','Friday')-1)+7,7) DAY
-);
 
-INSERT IGNORE INTO notifications (id,user_id,title,message,type,is_read,created_at) VALUES
-(1,1,'Weekly attendance report is ready','Your weekly attendance summary for all five classes is ready to review.','info',0,NOW()-INTERVAL 18 MINUTE),
-(2,1,'Student profiles need review','Three student profiles need review.','alert',0,NOW()-INTERVAL 2 HOUR),
-(3,1,'New instructor account added','Sofia Lim was added to the teaching team.','success',1,NOW()-INTERVAL 1 DAY),
-(4,2,'Class starting soon','Introduction to Programming begins in Lab 204 at 8:00 AM.','info',0,NOW()-INTERVAL 35 MINUTE),
-(5,2,'Attendance review requested','Please review the late arrivals from yesterday’s Database Management class.','alert',0,NOW()-INTERVAL 4 HOUR),
-(6,3,'Class roster updated','Two students were added to Web Systems and Technologies.','success',1,NOW()-INTERVAL 1 DAY),
-(7,4,'Attendance check-in ready','Your student profile is ready to use attendance check-in.','success',0,NOW()-INTERVAL 3 HOUR),
-(8,4,'Attendance recorded','You were marked present in Introduction to Programming.','info',1,NOW()-INTERVAL 1 DAY),
-(9,5,'Late arrival recorded','Your check-in for Database Management was recorded as late.','alert',0,NOW()-INTERVAL 1 DAY),
-(10,6,'Review your student profile','Your student profile is ready for attendance check-in.','info',0,NOW()-INTERVAL 2 DAY),
-(11,7,'Attendance streak','You have attended every class this week. Keep it up!','success',1,NOW()-INTERVAL 2 DAY),
-(12,8,'Schedule reminder','Applied Statistics meets Wednesday at 9:00 AM in Room 215.','info',0,NOW()-INTERVAL 3 DAY),
-(13,9,'Attendance marked excused','Your absence was updated to excused by your instructor.','success',1,NOW()-INTERVAL 4 DAY),
-(14,10,'Review your student profile','Your student profile is ready for attendance check-in.','info',0,NOW()-INTERVAL 5 DAY),
-(15,11,'Class update','Your Web Systems and Technologies room is Innovation Lab.','info',1,NOW()-INTERVAL 6 DAY),
-(16,12,'Attendance recorded','Your attendance in Fundamentals of Networking was recorded.','success',0,NOW()-INTERVAL 7 DAY),
-(17,13,'Review your student profile','Your student profile is ready for attendance check-in.','alert',0,NOW()-INTERVAL 8 DAY),
-(18,14,'Attendance streak','You have attended every class this week. Keep it up!','success',1,NOW()-INTERVAL 9 DAY),
-(19,15,'Attendance recorded','Your attendance records have been updated.','info',0,NOW()-INTERVAL 10 DAY),
-(20,16,'Student profile reminder','Your student profile is ready for attendance check-in.','alert',0,NOW()-INTERVAL 11 DAY),
-(21,17,'Attendance recorded','You were marked present in Applied Statistics.','success',1,NOW()-INTERVAL 12 DAY),
-(22,18,'Welcome to AttendEase','Your student account is ready. Review your classes and attendance from your dashboard.','info',0,NOW()-INTERVAL 13 DAY);
+INSERT IGNORE INTO schema_migrations (version) VALUES ('001_totp_attendance'),('002_workflows');

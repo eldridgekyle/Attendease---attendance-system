@@ -34,6 +34,14 @@ try {
     }
 
     $pdo->beginTransaction();
+    $enrolledCurrent = $pdo->prepare('SELECT 1 FROM enrollments WHERE student_id=? AND class_id=? FOR UPDATE');
+    $enrolledCurrent->execute([$student['id'],$classId]);
+    if (!$enrolledCurrent->fetchColumn()) {
+        $pdo->rollBack();
+        flash('error', 'You are no longer enrolled in that class.');
+        header('Location: attendance_logs.php');
+        exit;
+    }
     $sessionQuery = $pdo->prepare("SELECT s.id,s.class_id,s.secret_ciphertext,s.expires_at,s.ended_at,c.start_time FROM attendance_sessions s JOIN classes c ON c.id=s.class_id WHERE s.class_id=? AND s.secret_ciphertext IS NOT NULL AND s.ended_at IS NULL AND s.expires_at>NOW() ORDER BY s.id DESC LIMIT 1 FOR UPDATE");
     $sessionQuery->execute([$classId]);
     $session = $sessionQuery->fetch();
@@ -88,16 +96,8 @@ try {
         exit;
     }
     $status = (string)$now[1] > (string)$session['start_time'] ? 'Late' : 'Present';
-    $legacyAbsent = $pdo->prepare("SELECT id FROM attendance_logs WHERE student_id=? AND class_id=? AND attendance_date=? AND session_id IS NULL AND status='Absent' ORDER BY id DESC LIMIT 1 FOR UPDATE");
-    $legacyAbsent->execute([$student['id'],$classId,$now[0]]);
-    $legacyId = $legacyAbsent->fetchColumn();
-    if ($legacyId) {
-        $save = $pdo->prepare("UPDATE attendance_logs SET session_id=?,time_in=?,time_out=NULL,status=?,verification_method='TOTP',remarks=NULL WHERE id=?");
-        $save->execute([$session['id'],$now[1],$status,$legacyId]);
-    } else {
-        $save = $pdo->prepare("INSERT INTO attendance_logs (student_id,class_id,session_id,attendance_date,time_in,status,verification_method) VALUES (?,?,?,?,?,?,'TOTP')");
-        $save->execute([$student['id'], $classId, $session['id'], $now[0], $now[1], $status]);
-    }
+    $save = $pdo->prepare("INSERT INTO attendance_logs (student_id,class_id,session_id,attendance_date,time_in,status,verification_method) VALUES (?,?,?,?,?,?,'TOTP')");
+    $save->execute([$student['id'], $classId, $session['id'], $now[0], $now[1], $status]);
     $pdo->prepare('INSERT INTO notifications (user_id,title,message,type) VALUES (?,?,?,\'success\')')
         ->execute([$student['user_id'], 'Attendance recorded', 'Your attendance was recorded for this class session.']);
     $pdo->commit();

@@ -44,11 +44,13 @@ BEGIN
       ALTER TABLE attendance_sessions ADD COLUMN ended_at DATETIME NULL AFTER expires_at;
     END IF;
     UPDATE attendance_sessions SET ended_at=created_at WHERE secret_ciphertext IS NULL AND ended_at IS NULL;
+    -- Legacy PIN/QR columns may contain historical values. The application no
+    -- longer reads them; retain their data but allow new TOTP rows to omit them.
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='attendance_sessions' AND column_name='pin_hash') THEN
-      ALTER TABLE attendance_sessions DROP COLUMN pin_hash;
+      ALTER TABLE attendance_sessions MODIFY COLUMN pin_hash VARCHAR(255) NULL;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='attendance_sessions' AND column_name='qr_token_hash') THEN
-      ALTER TABLE attendance_sessions DROP COLUMN qr_token_hash;
+      ALTER TABLE attendance_sessions MODIFY COLUMN qr_token_hash CHAR(64) NULL;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='attendance_logs' AND constraint_name='fk_attendance_log_session') THEN
@@ -73,12 +75,9 @@ BEGIN
       INDEX idx_login_attempt_window (email,ip_hash,attempted_at)
     ) ENGINE=InnoDB;
 
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='students' AND column_name='face_status') THEN
-      ALTER TABLE students DROP COLUMN face_status;
-    END IF;
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='students' AND column_name='face_embedding_mock') THEN
-      ALTER TABLE students DROP COLUMN face_embedding_mock;
-    END IF;
+    -- Legacy biometric columns are intentionally left untouched so a migration
+    -- cannot destroy existing data. Current application code has no dependency
+    -- on those fields; remove them only after a verified backup if desired.
 
     UPDATE notifications SET title=REPLACE(REPLACE(title,'Face registration','Student profile'),'Face profile','Student profile'),
       message=REPLACE(REPLACE(message,'face profile','student profile'),'face-based check-in','attendance check-in')

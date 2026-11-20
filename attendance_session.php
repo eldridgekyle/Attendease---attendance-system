@@ -41,16 +41,25 @@ if (!current_user()) {
     session_json_error(401, 'Sign in to manage attendance sessions.');
 }
 $storedUser = current_user();
-$freshUserQuery = db()->prepare('SELECT id,full_name,email,role,avatar_url,created_at FROM users WHERE id=? AND is_active=1');
+$freshUserQuery = db()->prepare('SELECT id,full_name,email,role,avatar_url,created_at,auth_version FROM users WHERE id=? AND is_active=1');
 $freshUserQuery->execute([(int)$storedUser['id']]);
 $user = $freshUserQuery->fetch();
 if (!$user) {
     $_SESSION = [];
     session_json_error(401, 'This account is inactive. Sign in with an active account.');
 }
+if ((int)$user['auth_version'] !== (int)($storedUser['auth_version'] ?? 0)) {
+    $_SESSION = [];
+    session_json_error(401, 'Your account security details changed. Sign in again.');
+}
 $_SESSION['user'] = $user;
 $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
 $pdo = db();
+try {
+    finalize_expired_attendance_sessions($pdo);
+} catch (Throwable $error) {
+    error_log('AttendEase expired session finalization error: ' . $error->getMessage());
+}
 
 if ($user['role'] === 'student' && $_SERVER['REQUEST_METHOD'] === 'GET' && $action === 'student_status') {
     try {
@@ -117,6 +126,7 @@ try {
         if ($classId < 1 || !can_manage_class($pdo, $user, $classId)) {
             session_json_error(403, 'Choose a class you are allowed to manage.');
         }
+        finalize_expired_attendance_sessions($pdo);
         $pdo->beginTransaction();
         $lockSql = 'SELECT id FROM classes WHERE id=?' . ($user['role'] === 'teacher' ? ' AND teacher_id=?' : '') . ' FOR UPDATE';
         $lock = $pdo->prepare($lockSql);
@@ -125,7 +135,23 @@ try {
             $pdo->rollBack();
             session_json_error(403, 'Choose a class you are allowed to manage.');
         }
-        $pdo->prepare('UPDATE attendance_sessions SET ended_at=NOW(),secret_ciphertext=NULL WHERE class_id=? AND ended_at IS NULL AND expires_at>NOW()')->execute([$classId]);
+        $activeQuery = $pdo->prepare('SELECT id,secret_ciphertext,expires_at FROM attendance_sessions WHERE class_id=? AND secret_ciphertext IS NOT NULL AND finalized_at IS NULL AND ended_at IS NULL AND expires_at>NOW() ORDER BY id DESC LIMIT 1 FOR UPDATE');
+        $activeQuery->execute([$classId]);
+        $activeSession = $activeQuery->fetch();
+        if ($activeSession) {
+            $pdo->commit();
+            $activeSecret = decrypt_totp_secret((string)$activeSession['secret_ciphertext']);
+            echo json_encode([
+                'active' => true,
+                'existing' => true,
+                'session_id' => (int)$activeSession['id'],
+                'code' => totp_code($activeSecret),
+                'seconds_remaining' => 30 - (time() % 30),
+                'expires_at' => $activeSession['expires_at'],
+                'expires_label' => date('g:i A', strtotime($activeSession['expires_at'])),
+            ]);
+            exit;
+        }
         $secret = generate_totp_secret();
         $expiresQuery = $pdo->query('SELECT DATE_ADD(NOW(), INTERVAL 15 MINUTE)');
         $expiresAt = (string)$expiresQuery->fetchColumn();
@@ -150,10 +176,9 @@ try {
         if (!$session) {
             session_json_error(404, 'Attendance session not found.');
         }
-        if ($session['ended_at'] !== null) {
-            session_json_error(409, 'This attendance session has already ended.');
+        if ($session['finalized_at'] === null) {
+            finalize_attendance_session($pdo, $sessionId, true);
         }
-        $pdo->prepare('UPDATE attendance_sessions SET ended_at=NOW(),secret_ciphertext=NULL WHERE id=? AND ended_at IS NULL')->execute([$sessionId]);
         echo json_encode(['active' => false, 'ended' => true]);
         exit;
     }
