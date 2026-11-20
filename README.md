@@ -67,6 +67,14 @@ php -S 127.0.0.1:8000
 
 Open `http://127.0.0.1:8000`.
 
+### XAMPP on Windows
+
+1. Put the project in `C:\xampp\htdocs\AttendEase` and start MySQL from the XAMPP Control Panel.
+2. In phpMyAdmin, create the database named in `ATTENDEASE_DB_NAME` (for example, `attendease_db`) and import `schema.sql`. For an existing database, take a backup and apply both migrations in order instead of importing the fresh schema.
+3. Configure `ATTENDEASE_DB_HOST`, `ATTENDEASE_DB_NAME`, `ATTENDEASE_DB_USER`, `ATTENDEASE_DB_PASS`, `ATTENDEASE_APP_KEY`, and `ATTENDEASE_TIMEZONE` with Apache `SetEnv` directives in a local Apache configuration file that Apache loads. Use a dedicated MySQL account for AttendEase. Do not put credentials or the app key under `htdocs` or commit them. Generate the key once with `C:\xampp\php\php.exe -r "echo bin2hex(random_bytes(32)), PHP_EOL;"` and keep it stable.
+4. Restart Apache. Open `http://localhost/AttendEase/` and sign in using a development account listed above. Change the seeded passwords before using the system beyond local testing.
+5. For unattended 15-minute session expiry, add a Windows Task Scheduler task that runs `C:\xampp\php\php.exe` every minute with argument `C:\xampp\htdocs\AttendEase\expire_attendance_sessions.php`. Give that task the same database and app-key environment settings as Apache.
+
 ## Checks
 
 Run the RFC 6238 test vectors and the database workflow checks on a development database:
